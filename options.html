@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>M3U8 Catcher Settings</title>
+  <link rel="stylesheet" href="options.css" />
+</head>
+
+<body>
+  <main>
+    <h1>M3U8 Catcher Settings</h1>
+
+    <form id="settingsForm">
+      <label>
+        Native messaging host name
+        <input type="text" id="nativeHost" required />
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" id="showNotifications" />
+        Show desktop notifications when links are captured
+      </label>
+
+      <label>
+        Keep captured links for (hours)
+        <input type="number" id="retentionHours" min="1" step="1" />
+      </label>
+
+      <button type="submit">Save</button>
+    </form>
+
+    <aside>
+      <h2>Need help?</h2>
+      <p>
+        Configure the host name to match the native messaging manifest you install with your
+        Windows downloader app. See the project README for full instructions.
+      </p>
+    </aside>
+  </main>
+
+  <section id="status" hidden></section>
+
+  <script src="options.js" type="module"></script>
+</body>
+
+</html>
