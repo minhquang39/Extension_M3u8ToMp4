@@ -51,23 +51,18 @@ async function pushLink(entry) {
           parsed.search = "";
         }
       }
-      // Heuristic: many HLS CDN URLs embed short tokens and per-request numeric ids in the
-      // path. For common cases like `/.../something.mp4/index.m3u8` we canonicalize by
-      // preserving only the trailing path segments (so tokenized prefixes don't make
-      // otherwise-identical manifests appear unique).
+
       try {
         const segments = parsed.pathname.split("/").filter(Boolean);
         if (
           segments.length >= 4 &&
           segments[segments.length - 1].toLowerCase().endsWith("index.m3u8")
         ) {
-          const keep = 4; // keep last 4 segments: e.g. `vtvgo-media/vod/2025/11/04/.../index.m3u8`
+          const keep = 4;
           const tail = segments.slice(-keep).join("/");
           parsed.pathname = `/${tail}`;
         }
-      } catch (_e) {
-        // ignore and fall back to full path
-      }
+      } catch (_e) {}
 
       return parsed.toString();
     } catch (_error) {
@@ -144,7 +139,7 @@ async function sendToNative(entry) {
     detectedAt: entry.detectedAt,
     previewImage: entry.previewImage ?? null,
   };
-  console.log(message);
+  console.log(123, "Sending to native host", settings.nativeHost, message);
   return chrome.runtime.sendNativeMessage(settings.nativeHost, message);
 }
 
@@ -298,6 +293,15 @@ async function handleDetection(details) {
   };
 
   await processEntry(entry, tab);
+
+  if (details.tabId >= 0) {
+    chrome.tabs
+      .sendMessage(details.tabId, {
+        type: "show-popup",
+        payload: entry,
+      })
+      .catch(() => {});
+  }
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
@@ -424,6 +428,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     processEntry(entry, tab).catch((error) => {
       console.error("Failed to record video capture", error);
     });
+  }
+
+  if (message?.type === "download-video" && message.payload) {
+    console.log("📥 Download request received:", message.payload);
+
+    // Gọi sendToNative với payload
+    sendToNative(message.payload)
+      .then((response) => {
+        console.log("✅ Native host response:", response);
+        sendResponse({ success: true, response });
+      })
+      .catch((error) => {
+        console.error("❌ Native host error:", error);
+        sendResponse({ success: false, error: error.message });
+      });
+
+    // Return true để giữ channel mở cho async response
+    return true;
   }
 
   return false;

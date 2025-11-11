@@ -12,9 +12,7 @@
     "notifications",
     "nativeMessaging"
   ],
-  "host_permissions": [
-    "<all_urls>"
-  ],
+  "host_permissions": ["<all_urls>"],
   "action": {
     "default_title": "M3U8 Catcher",
     "default_popup": "popup.html"
@@ -26,7 +24,8 @@
     {
       "matches": ["<all_urls>"],
       "js": ["content.js"],
-      "run_at": "document_end"
+      "css": ["content.css"],
+      "run_at": "document_idle"
     }
   ],
   "options_page": "options.html",

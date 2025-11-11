@@ -1,0 +1,33 @@
+#idm-popup {
+    position: fixed;
+    background: #fff;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+    width: 180px;
+    font-family: sans-serif;
+    z-index: 999999;
+    transition: opacity 0.3s ease;
+}
+
+#idm-popup .idm-body {
+    padding: 4px;
+    text-align: justify;
+}
+
+#idm-popup .idm-download {
+    cursor: pointer;
+    background: #0078d7;
+    color: white;
+    border: none;
+    padding: 6px 10px;
+    border-radius: 4px;
+}
+
+#idm-popup .idm-close {
+    background: #0078d7;
+    color: white;
+    font-size: 18px;
+    line-height: 1;
+    border: none;
+}
