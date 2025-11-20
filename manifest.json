@@ -3,6 +3,7 @@
   "name": "M3U8 Catcher",
   "description": "Detects M3U8 video streams, lets you manage them, and forwards links to a native downloader app.",
   "version": "0.1.0",
+  "key": "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCrh/jdtpt4W7y+GvWcnPIoYAAM/mPE67o6bwjtaA4IOKD7oqlrqeUR+3hCTRy/DPU9vusSr4T3AtvwWiyXd+iZ5yTY4h724aYJUWjcCVmx6dd5sG8raQRRCQp5fIMu7DihFrrfbiTHeYC+tfuLKM66k0G3N8YUUOOQx3CLxEjIm08Cqvy6aHuUS2qPBO+iJka62SgCFhiizh49bCQhxVsPxqEfBpS+aRF1dNY3j2iHiF6erfXHfuKcBjg7cBzBTV5bZY/B0BIYWNQamJMBF4qjlFhk+JLh+NUn6TnoAL260/U6bVptmpffTe8rJLEnow1Nw5IIay7Z6IEes3sy3zctAgMBAAECggEAIJzISf0hR4unkbxl9LoZR2hjMhU+yk6oOFpqh9q4CkOcBePKEuR5H0dguLhZDhDsYqo1HvcckGssfmDiqAS+Bl7eUFcDnJxP2WcvSOCFO3CSjXooVMhRcAfIREtSVL5IUQZVjsvt9bgJ7JiEhBOE5I/BV5Ck2jF75seohAZUcUFXlzzC3mv1UDsS3ajDu2m7vl5TF0/4Eb9axZkydVtG1dRGvIvsO67zxUZXxkanX2EsG7UCaHzQf3CwO5HIzItGZU3CGAh9sCc36ZthgQLrr8j3Cu3/TVasrcIKVougUUyrSWOrCFZyRKZDuGEiemI938u31C5hGUiAiw3X3f8FUQKBgQDxGDYORejenzdI0Xir+SZL7D7QQsN6TPLGZTcYUg+qht9zUIxphWlnC5KK4UuGLoC7KppwBbUl8O7kOA20PVauqsechs/APYtg72k2uWwetcXtfC5yh8SOH1Bwi8P/Su3FKLywdvTytXLIjJWI/kVCBkz4YTqiZsZLzSazTZJYsQKBgQC2IsjrKf/gwMhmU4QRpi+YbxNytIUQmqTnGl50P1FCku/oyxQuYmte0pnoLCdiflQ3Yd7kq93hydvsRPb6utlVWGcGNqjIJDkkXEGzNaCR0MCJoxVjsr1bB9zrBaZS9KnUNa+7D+xivly5Ac5xz6Pw2HR3UEnzy2jjRlWiNralPQKBgQCMdWOAuz/o+u81cDwSTMv/7XnG0S6bQNsrtGn9tElGOt9RijrTexMmInrUiF78pHkBEdf5rYmUuiIjOXjaaeXnSr2SNoQwZmqeJbyxUiNoXNQcAH364ZgkiJ/Pgc3FHL0bYRlU4WjhQc7GggjYT/K/fXY4OkTzulaKcNG8IlRBcQKBgGdpVJ6A2DFqA95laMUEkF2CI46rBCorQ5mblSl3kdG0z9ZjB3BWnRPXi18RQsNfar2PKhi3pGFAVUfO2FP/psoYSVZzzlzkhDUq1HrF5gckeU0sdUaIA48d5cbjDE5pb8t3N/GD1vkxkD/S0L454KEspOPhiDuNsF3qX1CctBMZAoGAIAjJvO4Iyq7tdDKn6HLprSydkdZNDqFKJxs4iPLzcJIHk03gHchvqAmPVS3G7svLU28IXuje7127OMWOIA1ECfho/UZvcfs9Z49Hvx+aAvDP6OrMjkeRiLRymsK2i+4Dff63bsnpMyv8z29HONuN6nYYDgOkIIPl4SuJvNRkIdE=",
   "permissions": [
     "webRequest",
     "storage",
@@ -28,7 +29,6 @@
       "run_at": "document_idle"
     }
   ],
-  "options_page": "options.html",
   "icons": {
     "16": "assets/icon16.png",
     "32": "assets/icon32.png",

@@ -128,12 +128,7 @@ Tie the `payload.Url` into whatever logic you already use to download the stream
 
 ## Extension settings
 
-Open the popup to resend captured links or copy URLs. For more controls:
-
-1. Right-click the extension icon and choose **Options**, or open `chrome-extension://<id>/options.html`.
-2. Adjust the host name (`com.example.m3u8downloader` by default), retention duration, and notification preferences.
-
-If you're using a different host name in your registry manifest, make sure to update it on the options page so the extension targets the correct app.
+The extension uses the native host name `com.example.m3u8downloader` by default. Make sure this matches the name in your Windows registry manifest. Captured links are stored up to a maximum of 100 entries.
 
 ## Development notes
 

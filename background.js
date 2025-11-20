@@ -1,27 +1,11 @@
 const STORAGE_KEY = "capturedM3u8Links";
-const SETTINGS_KEY = "settings";
-const DEFAULT_SETTINGS = {
-  nativeHost: "com.example.m3u8downloader",
-  showNotifications: true,
-  retentionHours: 24,
-};
+const NATIVE_HOST = "com.example.m3u8downloader";
 
 const ICON_PATH = "assets/icon128.png";
-
-async function getSettings() {
-  const stored = await chrome.storage.sync.get(SETTINGS_KEY);
-  return { ...DEFAULT_SETTINGS, ...(stored?.[SETTINGS_KEY] ?? {}) };
-}
-
-async function setSettings(settings) {
-  await chrome.storage.sync.remove({ [SETTINGS_KEY]: settings });
-}
 
 async function pushLink(entry) {
   const { url } = entry;
   const now = Date.now();
-  const settings = await getSettings();
-  const { retentionHours } = settings;
 
   const existing = await chrome.storage.local.get(STORAGE_KEY);
   const list = existing?.[STORAGE_KEY] ?? [];
@@ -111,18 +95,7 @@ async function pushLink(entry) {
     pushIfNew(item);
   }
 
-  const retentionMs =
-    Math.max(1, retentionHours ?? DEFAULT_SETTINGS.retentionHours) *
-    60 *
-    60 *
-    1000;
-  const cutoff = now - retentionMs;
-  const filtered = ordered.filter((item) => {
-    if (!item?.detectedAt) return true;
-    return item.detectedAt >= cutoff;
-  });
-
-  const trimmed = filtered.slice(0, 100);
+  const trimmed = ordered.slice(0, 100);
   await chrome.storage.local.set({ [STORAGE_KEY]: trimmed });
   chrome.runtime
     .sendMessage({ type: "links-updated", payload: trimmed })
@@ -131,7 +104,6 @@ async function pushLink(entry) {
 }
 
 async function sendToNative(entry) {
-  const settings = await getSettings();
   const message = {
     url: entry.url,
     tabTitle: entry.tabTitle,
@@ -139,8 +111,8 @@ async function sendToNative(entry) {
     detectedAt: entry.detectedAt,
     previewImage: entry.previewImage ?? null,
   };
-  console.log(123, "Sending to native host", settings.nativeHost, message);
-  return chrome.runtime.sendNativeMessage(settings.nativeHost, message);
+  console.log("Sending to native host", NATIVE_HOST, message);
+  return chrome.runtime.sendNativeMessage(NATIVE_HOST, message);
 }
 
 async function resolvePreview(tab) {
@@ -251,31 +223,7 @@ async function processEntry(entry, tab) {
   }
 
   const isNew = await pushLink(entry);
-  if (!isNew) return false;
-
-  const settings = await getSettings();
-  await notifyCapture(entry, settings);
-  return true;
-}
-
-async function notifyCapture(entry, settings) {
-  const prefs = settings ?? (await getSettings());
-  if (!prefs.showNotifications) return;
-
-  chrome.notifications.create(
-    {
-      type: "basic",
-      iconUrl: ICON_PATH,
-      title: "M3U8 stream detected",
-      message: entry.url,
-      contextMessage: "Click to send to downloader",
-    },
-    () => {
-      if (chrome.runtime.lastError) {
-        console.warn("Notification error", chrome.runtime.lastError);
-      }
-    }
-  );
+  return isNew;
 }
 
 async function handleDetection(details) {
@@ -292,8 +240,7 @@ async function handleDetection(details) {
     detectedAt: Date.now(),
   };
 
-  await processEntry(entry, tab);
-
+  // ✅ Hiển thị popup NGAY LẬP TỨC
   if (details.tabId >= 0) {
     chrome.tabs
       .sendMessage(details.tabId, {
@@ -302,14 +249,14 @@ async function handleDetection(details) {
       })
       .catch(() => {});
   }
+
+  // Xử lý preview và lưu storage sau (không chặn popup)
+  processEntry(entry, tab).catch((error) => {
+    console.error("Failed to process entry:", error);
+  });
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
-  const existing = await chrome.storage.sync.get(SETTINGS_KEY);
-  if (!existing?.[SETTINGS_KEY]) {
-    await setSettings(DEFAULT_SETTINGS);
-  }
-
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: "send-last",
@@ -381,17 +328,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendToNative(message.payload).catch((error) => {
       console.error("Resend failed", error);
     });
-  }
-
-  if (message?.type === "update-settings" && message.payload) {
-    setSettings(message.payload).catch((error) => {
-      console.error("Failed to store settings", error);
-    });
-  }
-
-  if (message?.type === "get-settings") {
-    getSettings().then((settings) => sendResponse(settings));
-    return true;
   }
 
   if (message?.type === "clear-links") {
