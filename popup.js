@@ -1,6 +1,5 @@
-const clearAllBtn = document.getElementById("clearAll");
-async function getLinks() {
-  return chrome.runtime.sendMessage({ type: "get-links" });
+async function getLatestVideo() {
+  return chrome.runtime.sendMessage({ type: "get-latest-video" });
 }
 
 function escapeHtml(value) {
@@ -32,46 +31,23 @@ function getHostname(url) {
   }
 }
 
-function getThumbnailText(entry) {
-  const source = (entry.tabTitle || getHostname(entry.pageUrl) || "HLS").trim();
-  return source.slice(0, 2).toUpperCase();
-}
+function formatDuration(seconds) {
+  if (!seconds || isNaN(seconds)) return "";
+  const hrs = Math.floor(seconds / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
 
-function formatDetectedAgo(timestamp) {
-  if (!timestamp) return "Just now";
-  const diff = Date.now() - timestamp;
-  const minutes = Math.floor(diff / 60000);
-  const hours = Math.floor(diff / 3600000);
-  if (hours >= 1) {
-    return `${hours}h ago`;
+  if (hrs > 0) {
+    return `${hrs}:${String(mins).padStart(2, "0")}:${String(secs).padStart(
+      2,
+      "0"
+    )}`;
   }
-  if (minutes >= 1) {
-    return `${minutes}m ago`;
-  }
-  return "Just now";
-}
-
-function formatTime(timestamp) {
-  if (!timestamp) return "";
-  return new Date(timestamp).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function formatDateTime(timestamp) {
-  if (!timestamp) return "";
-  return new Date(timestamp).toLocaleString([], {
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
 }
 
 async function render() {
-  const links = await getLinks();
+  const links = await getLatestVideo();
   const linksList = document.getElementById("links");
   const errorBox = document.getElementById("error");
 
@@ -82,58 +58,277 @@ async function render() {
   if (!links.length) {
     linksList.innerHTML = `
       <li class="empty-placeholder">
-        <div class="empty-placeholder__title">No captures yet</div>
-        <div class="empty-placeholder__caption">Start an HLS stream and the link will appear here automatically.</div>
+            <div class="logo">
+              <span></span>
+              <span></span>
+              <span></span>
+            </div>
+        <div class="empty-placeholder__caption">Waiting for media...</div>
       </li>
     `;
     return;
   }
+
+  const downloadStates = await chrome.runtime.sendMessage({
+    type: "get-download-state",
+  });
+  const stateMap = new Map(downloadStates.map((s) => [s.url, s]));
 
   for (const entry of links) {
     const li = document.createElement("li");
     li.className = "link-item";
 
     const tabTitle = escapeHtml(entry.tabTitle ?? "Unknown stream");
-    const pageUrl = escapeHtml(entry.pageUrl ?? "");
-    const hostname = escapeHtml(getHostname(entry.pageUrl ?? entry.url));
-    const detectedAgo = escapeHtml(formatDetectedAgo(entry.detectedAt));
-    const detectedTime = escapeHtml(formatTime(entry.detectedAt));
-    const detectedDisplay = escapeHtml(formatDateTime(entry.detectedAt));
-    const methodRaw = (entry.method ?? "GET").toUpperCase();
-    const methodLabel = escapeHtml(methodRaw);
-    const url = escapeHtml(entry.url);
-    const thumbText = escapeHtml(getThumbnailText(entry));
     const previewUrl = escapeHtml(entry.previewImage ?? "");
-    const isM3u8 = entry.url?.toLowerCase().includes(".m3u8");
-    const primaryBadge = escapeHtml(isM3u8 ? "M3U8" : methodRaw);
-    const thumbnailMarkup = previewUrl
-      ? `<div class="thumbnail has-image"><img src="${previewUrl}" alt="Preview" /></div>`
-      : `<div class="thumbnail">${thumbText}</div>`;
+
+    const thumbnailMarkup = `
+      <div class="thumbnail video-preview">
+        <video class="preview-video" muted playsinline></video>
+        <span class="duration"></span>
+        <div class="play-overlay">▶</div>
+      </div>
+    `;
 
     li.innerHTML = `
       <div class="link-top">
         ${thumbnailMarkup}
         <div class="meta">
-          <div class="badge-row">
-            <span class="badge badge-primary">${primaryBadge}</span>
-            <span class="badge badge-muted">${methodLabel}</span>
-            <span class="badge badge-muted" title="${detectedTime}">${detectedAgo}</span>
+          <p title="${tabTitle}">${tabTitle}</p>
+          <div class="link-actions">
+            <button class="primary send">Download</button>
           </div>
-          <h3 title="${tabTitle}">${tabTitle}</h3>
-          <div class="page-url" title="${pageUrl}">${hostname}</div>
-          <div class="capture-time">Captured ${detectedDisplay}</div>
         </div>
       </div>
-      <div class="link-actions">
-      <button class="primary send">Download</button>
-      <button class="ghost copy" title="Copy link">Copy</button>
-      </div>
       `;
-    //   <div class="link-url" title="${url}">${url}</div>
 
-    const [sendBtn, copyBtn] = li.querySelectorAll("button");
-    sendBtn.addEventListener("click", async () => {
-      console.log("Download..." + entry.url);
+    const videoElement = li.querySelector(".preview-video");
+    const playOverlay = li.querySelector(".play-overlay");
+    const thumbnail = li.querySelector(".thumbnail");
+
+    if (window.Hls && window.Hls.isSupported()) {
+      const hls = new Hls({
+        maxBufferLength: 15,
+        maxMaxBufferLength: 15,
+        enableWorker: true,
+        maxLoadingDelay: 4,
+        manifestLoadingTimeOut: 10000,
+        manifestLoadingMaxRetry: 2,
+        levelLoadingTimeOut: 10000,
+      });
+
+      let hasLoaded = false;
+      let loadTimeout = setTimeout(() => {
+        if (!hasLoaded) {
+          videoElement.style.display = "none";
+          playOverlay.style.display = "none";
+          hls.destroy();
+        }
+      }, 12000);
+
+      hls.loadSource(entry.url);
+      hls.attachMedia(videoElement);
+
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        clearTimeout(loadTimeout);
+        hasLoaded = true;
+        videoElement.play().catch(() => {});
+        playOverlay.style.opacity = "0";
+
+        videoElement.addEventListener("loadedmetadata", () => {
+          const duration = videoElement.duration;
+          if (duration && isFinite(duration)) {
+            const durationSpan = li.querySelector(".duration");
+            if (durationSpan) {
+              durationSpan.textContent = formatDuration(duration);
+            }
+          }
+        });
+      });
+
+      hls.on(Hls.Events.ERROR, (event, data) => {
+        if (data.fatal) {
+          clearTimeout(loadTimeout);
+          hls.destroy();
+
+          videoElement.style.display = "none";
+          playOverlay.style.display = "none";
+
+          if (previewUrl) {
+            thumbnail.innerHTML = `<img src="${previewUrl}" alt="Preview" /><span class="duration"></span>`;
+          } else {
+            thumbnail.innerHTML = `
+              <div class="video-placeholder">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                </svg>
+              </div>
+              <span class="duration"></span>
+            `;
+            thumbnail.style.backgroundColor = "rgba(15, 23, 42, 0.3)";
+          }
+        }
+      });
+    } else if (videoElement.canPlayType("application/vnd.apple.mpegurl")) {
+      videoElement.src = entry.url;
+
+      videoElement.play().catch(() => {});
+      playOverlay.style.opacity = "0";
+
+      videoElement.addEventListener("loadedmetadata", () => {
+        const duration = videoElement.duration;
+        if (duration && isFinite(duration)) {
+          const durationSpan = li.querySelector(".duration");
+          if (durationSpan) {
+            durationSpan.textContent = formatDuration(duration);
+          }
+        }
+      });
+    }
+
+    const actionsDiv = li.querySelector(".link-actions");
+    const sendBtn = li.querySelector("button");
+    const state = stateMap.get(entry.url);
+    if (state) {
+      if (state.isDownloading) {
+        const isConverting =
+          state.status &&
+          state.status.toLowerCase().includes("conversion") &&
+          state.progress >= 99;
+
+        actionsDiv.innerHTML = `
+          <div class="progress-container">
+            <div class="progress-info">
+              <span class="progress-text">${state.status}</span>
+              <span class="progress-percent">${Math.round(
+                state.progress
+              )}%</span>
+            </div>
+            <div class="progress-bar">
+              <div class="progress-fill" style="width: ${Math.min(
+                state.progress,
+                100
+              )}%"></div>
+            </div>
+          </div>
+          ${
+            isConverting
+              ? '<span class="spinner"></span>'
+              : '<button class="cancel-btn">Cancel</button>'
+          }
+        `;
+
+        if (!isConverting) {
+          const cancelBtn = actionsDiv.querySelector(".cancel-btn");
+          cancelBtn.addEventListener("click", async () => {
+            try {
+              await chrome.runtime.sendMessage({
+                type: "cancel-download",
+                payload: { url: entry.url },
+              });
+            } catch (error) {
+              render().catch(console.error);
+            }
+          });
+        }
+      } else if (state.isFailed) {
+        actionsDiv.innerHTML = `
+          <div class="error-container">
+            <span class="error-text">❌ Error</span>
+          </div>
+          <button class="retry-btn">Retry</button>
+        `;
+
+        const retryBtn = actionsDiv.querySelector(".retry-btn");
+        retryBtn.addEventListener("click", async () => {
+          retryBtn.disabled = true;
+          retryBtn.textContent = "Retrying...";
+
+          await chrome.runtime.sendMessage({
+            type: "clear-failed-state",
+            payload: { url: entry.url },
+          });
+
+          actionsDiv.innerHTML = `
+            <div class="progress-container">
+              <div class="progress-info">
+                <span class="progress-text">Connecting...</span>
+                <span class="progress-percent">0%</span>
+              </div>
+              <div class="progress-bar">
+                <div class="progress-fill" style="width: 0%"></div>
+              </div>
+            </div>
+            <button class="cancel-btn">Cancel</button>
+          `;
+
+          const cancelBtn = actionsDiv.querySelector(".cancel-btn");
+          cancelBtn.addEventListener("click", async () => {
+            try {
+              await chrome.runtime.sendMessage({
+                type: "cancel-download",
+                payload: { url: entry.url },
+              });
+            } catch (error) {
+              render().catch(console.error);
+            }
+          });
+
+          try {
+            await chrome.runtime.sendMessage({
+              type: "resend-link",
+              payload: entry,
+            });
+          } catch (error) {
+            render().catch(console.error);
+          }
+        });
+      } else if (state.progress >= 100) {
+        actionsDiv.innerHTML = `
+          <button class="primary completed">✓ Completed</button>
+          <button class="open-folder-btn">Open Folder</button>
+        `;
+
+        const openFolderBtn = actionsDiv.querySelector(".open-folder-btn");
+        openFolderBtn?.addEventListener("click", () => {
+          chrome.runtime
+            .sendMessage({
+              type: "open-folder",
+              payload: { filePath: state.filePath },
+            })
+            .catch(console.error);
+        });
+      }
+
+      linksList.appendChild(li);
+      continue;
+    }
+
+    const handleDownload = async () => {
+      actionsDiv.innerHTML = `
+        <div class="progress-container">
+          <div class="progress-info">
+            <span class="progress-text">Downloading...</span>
+            <span class="progress-percent">0%</span>
+          </div>
+          <div class="progress-bar">
+            <div class="progress-fill" style="width: 0%"></div>
+          </div>
+        </div>
+        <button class="cancel-btn">Cancel</button>
+      `;
+
+      const cancelBtn = actionsDiv.querySelector(".cancel-btn");
+      cancelBtn.addEventListener("click", async () => {
+        try {
+          await chrome.runtime.sendMessage({
+            type: "cancel-download",
+            payload: { url: entry.url },
+          });
+        } catch (error) {
+          render().catch(console.error);
+        }
+      });
+
       try {
         await chrome.runtime.sendMessage({
           type: "resend-link",
@@ -142,43 +337,65 @@ async function render() {
       } catch (error) {
         errorBox.textContent = error?.message ?? String(error);
         errorBox.hidden = false;
+        render().catch(console.error);
       }
-    });
+    };
 
-    copyBtn.dataset.originalLabel = copyBtn.textContent;
-    copyBtn.addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(entry.url);
-        errorBox.hidden = true;
-        errorBox.textContent = "";
-        showCopyFeedback(copyBtn);
-      } catch (error) {
-        errorBox.textContent =
-          "Failed to copy URL. Check clipboard permissions.";
-        errorBox.hidden = false;
-        resetCopyFeedback(copyBtn);
-      }
-    });
+    sendBtn.addEventListener("click", handleDownload);
 
     linksList.appendChild(li);
   }
-
-  if (clearAllBtn && !clearAllBtn.dataset.bound) {
-    clearAllBtn.dataset.bound = "true";
-    clearAllBtn.addEventListener("click", handleClearAll);
-  }
 }
 
-document.getElementById("refresh").addEventListener("click", render);
-
 chrome.runtime.onMessage.addListener((message) => {
-  if (message?.type === "links-updated") {
+  if (message?.type === "video-updated") {
     render().catch(console.error);
   }
   if (message?.type === "native-error") {
     const errorBox = document.getElementById("error");
     errorBox.textContent = message.payload;
     errorBox.hidden = false;
+  }
+
+  if (message?.type === "download-error") {
+    render().catch(console.error);
+  }
+
+  if (message?.type === "download-completed") {
+    render().catch(console.error);
+  }
+
+  if (message?.type === "download-progress") {
+    const { progress, status, message: messageText } = message.payload;
+
+    const progressFill = document.querySelector(".progress-fill");
+    const progressPercent = document.querySelector(".progress-percent");
+    const progressText = document.querySelector(".progress-text");
+    const cancelBtn = document.querySelector(".cancel-btn");
+    const convertingLoader = document.querySelector(".converting-loader");
+
+    if (progressFill && progressPercent) {
+      progressFill.style.width = `${Math.min(progress, 100)}%`;
+      progressPercent.textContent = `${Math.round(progress)}%`;
+
+      if (progressText && status) {
+        progressText.textContent = status;
+      }
+
+      if (
+        status &&
+        status.toLowerCase().includes("conversion") &&
+        progress >= 99 &&
+        cancelBtn &&
+        !convertingLoader
+      ) {
+        cancelBtn.outerHTML = '<span class="spinner"></span>';
+      }
+    }
+  }
+
+  if (message?.type === "download-cancelled") {
+    render().catch(console.error);
   }
 });
 
@@ -187,58 +404,3 @@ render().catch((error) => {
   errorBox.textContent = error?.message ?? String(error);
   errorBox.hidden = false;
 });
-
-async function handleClearAll() {
-  const errorBox = document.getElementById("error");
-  errorBox.hidden = true;
-
-  if (!clearAllBtn) {
-    return;
-  }
-
-  // if (!confirm("Delete all captured links? This action cannot be undone.")) {
-  //   return;
-  // }
-
-  try {
-    clearAllBtn.disabled = true;
-    const response = await chrome.runtime.sendMessage({ type: "clear-links" });
-    if (!response?.ok) {
-      throw new Error(response?.error ?? "Failed to delete captured links.");
-    }
-    await render();
-  } catch (error) {
-    console.error(error);
-    errorBox.textContent = error?.message ?? "Failed to delete captured links.";
-    errorBox.hidden = false;
-  } finally {
-    clearAllBtn.disabled = false;
-  }
-}
-
-function showCopyFeedback(button) {
-  if (!button) return;
-  const originalLabel = button.dataset.originalLabel || "Copy";
-  button.textContent = "Copied";
-  button.classList.add("copied", "show-tooltip");
-  button.setAttribute("data-tooltip", "Copied!");
-
-  if (button.__copyResetTimeout) {
-    clearTimeout(button.__copyResetTimeout);
-  }
-
-  button.__copyResetTimeout = setTimeout(() => {
-    resetCopyFeedback(button, originalLabel);
-  }, 1200);
-}
-
-function resetCopyFeedback(button, label = "Copy") {
-  if (!button) return;
-  button.textContent = label;
-  button.classList.remove("copied", "show-tooltip");
-  button.removeAttribute("data-tooltip");
-  if (button.__copyResetTimeout) {
-    clearTimeout(button.__copyResetTimeout);
-    button.__copyResetTimeout = null;
-  }
-}

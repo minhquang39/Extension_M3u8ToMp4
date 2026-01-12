@@ -1,7 +1,6 @@
 (() => {
   const reported = new Set();
-  const MAX_TRACKED = 200;
-  const videoPositionCache = new WeakMap(); // ✅ Cache vị trí video
+  const MAX_TRACKED = 1;
 
   const absolutify = (url) => {
     if (!url) return null;
@@ -85,115 +84,6 @@
       .catch(() => {});
   };
 
-  const createPopup = (video, payload) => {
-    const old = document.getElementById("idm-popup");
-    if (old) old.remove();
-
-    const popup = document.createElement("div");
-    popup.id = "idm-popup";
-
-    // ✅ Pre-position off-screen để tránh flash
-    popup.style.cssText = `
-      position: fixed !important;
-      opacity: 0;
-      top: -9999px;
-      transition: opacity 0.15s ease-out;
-    `;
-
-    popup.innerHTML = `
-      <div class="idm-body">
-        <button class="idm-download">Download this video</button>
-        <button class="idm-close">&times;</button>
-      </div>
-    `;
-
-    document.body.appendChild(popup);
-
-    // ✅ Dùng requestAnimationFrame để đồng bộ với browser rendering
-    requestAnimationFrame(() => {
-      if (video) {
-        // ✅ Kiểm tra cache trước
-        let rect = videoPositionCache.get(video);
-
-        if (!rect || rect.width === 0) {
-          rect = video.getBoundingClientRect();
-
-          // Lưu vào cache
-          if (rect.width > 0 && rect.height > 0) {
-            videoPositionCache.set(video, rect);
-
-            // Clear cache khi video thay đổi
-            const clearCache = () => videoPositionCache.delete(video);
-            video.addEventListener("fullscreenchange", clearCache, {
-              once: true,
-              passive: true,
-            });
-            window.addEventListener("resize", clearCache, {
-              once: true,
-              passive: true,
-            });
-          }
-        }
-
-        const offset = 10;
-
-        if (rect.width > 0 && rect.height > 0) {
-          // ✅ Đặt popup Ở TRONG video, góc phải trên (như IDM)
-          popup.style.top = `${rect.top + window.scrollY + offset}px`;
-          popup.style.left = `${rect.right + window.scrollX - 200}px`; // 200 = popup width + offset
-        } else {
-          // Video hidden hoặc 0x0, hiển thị góc phải trên màn hình
-          popup.style.top = "20px";
-          popup.style.right = "20px";
-          popup.style.left = "auto";
-        }
-      } else {
-        // Fallback: góc phải trên màn hình
-        popup.style.top = "20px";
-        popup.style.right = "20px";
-        popup.style.left = "auto";
-      }
-
-      // ✅ Fade in smooth
-      popup.style.opacity = "1";
-    });
-
-    popup.querySelector(".idm-download").onclick = async () => {
-      try {
-        const response = await chrome.runtime.sendMessage({
-          type: "download-video",
-          payload: payload,
-        });
-
-        const btn = popup.querySelector(".idm-download");
-        btn.textContent = "✓ Downloading...";
-        btn.disabled = true;
-
-        setTimeout(() => {
-          popup.style.opacity = "0";
-          setTimeout(() => popup.remove(), 150);
-        }, 2000);
-      } catch (error) {
-        console.error("❌ Download failed:", error);
-
-        const btn = popup.querySelector(".idm-download");
-        btn.textContent = "✗ Failed";
-        btn.style.background = "#dc3545";
-
-        setTimeout(() => {
-          btn.textContent = "Download this video";
-          btn.style.background = "#0078d7";
-          btn.disabled = false;
-        }, 2000);
-      }
-    };
-
-    popup.querySelector(".idm-close").onclick = () => {
-      popup.style.opacity = "0";
-      setTimeout(() => popup.remove(), 150);
-    };
-  };
-
   const bindVideo = (video) => {
     if (!(video instanceof HTMLVideoElement)) return;
 
@@ -256,26 +146,5 @@
     },
     { capture: true, passive: true }
   );
-
   scanExistingVideos();
-
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.type === "show-popup") {
-      // Tìm video đang phát (nếu có)
-      const videos = document.querySelectorAll("video");
-      let activeVideo = null;
-
-      for (const video of videos) {
-        if (!video.paused || video.readyState >= 2) {
-          activeVideo = video;
-          break;
-        }
-      }
-
-      createPopup(activeVideo, message.payload);
-      sendResponse({ success: true });
-    }
-
-    return true;
-  });
 })();

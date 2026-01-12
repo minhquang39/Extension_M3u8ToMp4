@@ -1,106 +1,70 @@
-const STORAGE_KEY = "capturedM3u8Links";
 const NATIVE_HOST = "com.example.m3u8downloader";
-
 const ICON_PATH = "assets/icon128.png";
 
-async function pushLink(entry) {
-  const { url } = entry;
-  const now = Date.now();
+const videosByTab = new Map();
+const downloadStates = new Map();
 
-  const existing = await chrome.storage.local.get(STORAGE_KEY);
-  const list = existing?.[STORAGE_KEY] ?? [];
+const activeDownloads = new Map();
 
-  const normalizeKey = (candidate) => {
-    if (!candidate || typeof candidate !== "string") return "";
-    const trimmed = candidate.trim();
+const cancelRequests = new Set();
+
+const reconnectAttempts = new Map();
+const MAX_RECONNECT_ATTEMPTS = 10;
+const RECONNECT_BASE_DELAY = 2000;
+const CONNECTION_TIMEOUT = 90000;
+
+const allowUrls = ["vntd-thvn.vtvdigital.vn"];
+
+function isTargetUrl(tabOrUrl) {
+  if (!tabOrUrl) return false;
+
+  let hostname;
+  if (typeof tabOrUrl === "string") {
     try {
-      const parsed = new URL(trimmed);
-      parsed.hash = "";
-      if (parsed.search) {
-        const params = Array.from(parsed.searchParams.entries());
-        if (params.length) {
-          params.sort(([aKey, aValue], [bKey, bValue]) => {
-            if (aKey === bKey) {
-              return String(aValue).localeCompare(String(bValue));
-            }
-            return aKey.localeCompare(bKey);
-          });
-          const normalizedParams = new URLSearchParams();
-          for (const [key, value] of params) {
-            normalizedParams.append(key, value);
-          }
-          const serialized = normalizedParams.toString();
-          parsed.search = serialized ? `?${serialized}` : "";
-        } else {
-          parsed.search = "";
-        }
+      hostname = new URL(tabOrUrl).hostname;
+    } catch {
+      return false;
+    }
+  } else {
+    try {
+      hostname = new URL(tabOrUrl.url).hostname;
+    } catch {
+      return false;
+    }
+  }
+
+  return allowUrls.includes(hostname);
+}
+
+async function setVideoForTab(entry) {
+  if (videosByTab.size > 0 || downloadStates.size > 0) {
+    let hasActiveVideo = false;
+
+    for (const [url, state] of downloadStates.entries()) {
+      if (state.isDownloading || state.isFailed) {
+        hasActiveVideo = true;
+        break;
       }
-
-      try {
-        const segments = parsed.pathname.split("/").filter(Boolean);
-        if (
-          segments.length >= 4 &&
-          segments[segments.length - 1].toLowerCase().endsWith("index.m3u8")
-        ) {
-          const keep = 4;
-          const tail = segments.slice(-keep).join("/");
-          parsed.pathname = `/${tail}`;
-        }
-      } catch (_e) {}
-
-      return parsed.toString();
-    } catch (_error) {
-      return trimmed;
     }
-  };
 
-  const keyFor = (candidate) => {
-    const normalized = normalizeKey(candidate);
-    if (normalized) return normalized;
-    if (candidate == null) return "";
-    return String(candidate).trim();
-  };
-
-  const targetKey = keyFor(url);
-  let mergedEntry = entry;
-
-  if (targetKey) {
-    const previous = list.find((item) => keyFor(item?.url) === targetKey);
-    if (previous) {
-      mergedEntry = {
-        ...previous,
-        ...entry,
-        tabTitle: entry.tabTitle || previous.tabTitle || entry.tabTitle,
-        pageUrl: entry.pageUrl || previous.pageUrl || entry.pageUrl,
-        previewImage: entry.previewImage ?? previous.previewImage ?? null,
-        detectedAt: entry.detectedAt,
-      };
+    if (hasActiveVideo) {
+      return;
     }
+
+    videosByTab.clear();
+    downloadStates.clear();
   }
-
-  const ordered = [];
-  const seen = new Set();
-
-  const pushIfNew = (item) => {
-    if (!item) return;
-    const key = keyFor(item.url);
-    const dedupeKey = key || `__blank-${ordered.length}`;
-    if (seen.has(dedupeKey)) return;
-    seen.add(dedupeKey);
-    ordered.push(item);
-  };
-
-  pushIfNew(mergedEntry);
-  for (const item of list) {
-    pushIfNew(item);
+  const tabId = entry.tabId;
+  if (tabId >= 0 && isTargetUrl(entry.pageUrl)) {
+    videosByTab.set(tabId, entry);
   }
+  // if (tabId >= 0) {
+  //   videosByTab.set(tabId, entry);
+  // }
 
-  const trimmed = ordered.slice(0, 100);
-  await chrome.storage.local.set({ [STORAGE_KEY]: trimmed });
   chrome.runtime
-    .sendMessage({ type: "links-updated", payload: trimmed })
+    .sendMessage({ type: "video-updated", payload: entry })
     .catch(() => {});
-  return true;
 }
 
 async function sendToNative(entry) {
@@ -110,8 +74,8 @@ async function sendToNative(entry) {
     pageUrl: entry.pageUrl,
     detectedAt: entry.detectedAt,
     previewImage: entry.previewImage ?? null,
+    autoStart: true,
   };
-  console.log("Sending to native host", NATIVE_HOST, message);
   return chrome.runtime.sendNativeMessage(NATIVE_HOST, message);
 }
 
@@ -201,7 +165,6 @@ async function resolvePreview(tab) {
       title,
     };
   } catch (error) {
-    console.warn("Preview extraction failed", error);
     return {
       image: tab?.favIconUrl ?? null,
       title: tab?.title ?? null,
@@ -222,8 +185,312 @@ async function processEntry(entry, tab) {
     entry.tabTitle = preview.title;
   }
 
-  const isNew = await pushLink(entry);
-  return isNew;
+  if (isTargetUrl(tab)) await setVideoForTab(entry);
+  // await setVideoForTab(entry);
+}
+
+async function attemptReconnect(url, payload, attemptNumber = 0) {
+  if (attemptNumber >= MAX_RECONNECT_ATTEMPTS) {
+    reconnectAttempts.delete(url);
+
+    const currentProgress = downloadStates.get(url)?.progress || 0;
+    downloadStates.set(url, {
+      progress: currentProgress,
+      status: "Connection failed",
+      isDownloading: false,
+      isFailed: true,
+      errorMessage: "Unable to connect. Please click Retry to try again.",
+    });
+
+    chrome.runtime
+      .sendMessage({
+        type: "download-error",
+        payload: { url, message: "Unable to connect after multiple attempts" },
+      })
+      .catch(() => {});
+
+    return;
+  }
+  reconnectAttempts.set(url, attemptNumber + 1);
+
+  const delay = Math.min(
+    RECONNECT_BASE_DELAY * Math.pow(2, attemptNumber),
+    30000
+  );
+
+  const currentProgress = downloadStates.get(url)?.progress || 0;
+  const waitSeconds = Math.round(delay / 1000);
+  downloadStates.set(url, {
+    progress: currentProgress,
+    status: `Reconnecting in ${waitSeconds}s... (${
+      attemptNumber + 1
+    }/${MAX_RECONNECT_ATTEMPTS})`,
+    isDownloading: true,
+    isFailed: false,
+  });
+
+  chrome.runtime
+    .sendMessage({
+      type: "download-progress",
+      payload: {
+        url: url,
+        progress: currentProgress,
+        status: `Reconnecting in ${waitSeconds}s... (${
+          attemptNumber + 1
+        }/${MAX_RECONNECT_ATTEMPTS})`,
+      },
+    })
+    .catch(() => {});
+
+  await new Promise((resolve) => setTimeout(resolve, delay));
+
+  try {
+    await startDownload(payload);
+  } catch (error) {
+    await attemptReconnect(url, payload, attemptNumber + 1);
+  }
+}
+
+async function startDownload(payload) {
+  const url = payload.url;
+
+  return new Promise((resolve, reject) => {
+    let port;
+    let connectionTimeout;
+
+    try {
+      if (!downloadStates.has(url)) {
+        downloadStates.set(url, {
+          progress: 0,
+          status: "Connecting...",
+          isDownloading: true,
+          isFailed: false,
+        });
+
+        chrome.runtime
+          .sendMessage({
+            type: "download-progress",
+            payload: {
+              url: url,
+              progress: 0,
+              status: "Connecting...",
+            },
+          })
+          .catch(() => {});
+      }
+
+      port = chrome.runtime.connectNative(NATIVE_HOST);
+      activeDownloads.set(url, port);
+
+      connectionTimeout = setTimeout(() => {
+        if (port) {
+          port.disconnect();
+        }
+
+        activeDownloads.delete(url);
+
+        const state = downloadStates.get(url);
+        if (state && state.isDownloading && !cancelRequests.has(url)) {
+          attemptReconnect(url, payload, reconnectAttempts.get(url) || 0);
+        } else {
+          downloadStates.delete(url);
+          chrome.runtime
+            .sendMessage({
+              type: "native-error",
+              payload: "Connection timeout. Native Host may not be running.",
+            })
+            .catch(() => {});
+        }
+
+        reject(new Error("Connection timeout"));
+      }, CONNECTION_TIMEOUT);
+
+      port.postMessage({
+        url: payload.url,
+        tabTitle: payload.tabTitle,
+        pageUrl: payload.pageUrl,
+        previewImage: payload.previewImage,
+        detectedAt: payload.detectedAt,
+        autoStart: true,
+      });
+
+      port.onMessage.addListener((msg) => {
+        clearTimeout(connectionTimeout);
+
+        reconnectAttempts.delete(url);
+
+        if (msg.type === "started") {
+          downloadStates.set(url, {
+            progress: msg.progress || 0,
+            status: msg.status || msg.message || "Starting conversion...",
+            isDownloading: true,
+            isFailed: false,
+          });
+
+          chrome.runtime
+            .sendMessage({
+              type: "download-progress",
+              payload: {
+                url: url,
+                progress: msg.progress || 0,
+                status: msg.status || msg.message || "Starting conversion...",
+              },
+            })
+            .catch(() => {});
+        } else if (msg.type === "progress") {
+          downloadStates.set(url, {
+            progress: msg.progress || 0,
+            status: msg.status || msg.message || "Downloading...",
+            isDownloading: true,
+            isFailed: false,
+          });
+
+          chrome.runtime
+            .sendMessage({
+              type: "download-progress",
+              payload: {
+                url: url,
+                progress: msg.progress || 0,
+                status: msg.status || msg.message || "Downloading...",
+              },
+            })
+            .catch(() => {});
+        } else if (msg.type === "completed") {
+          downloadStates.set(url, {
+            progress: 100,
+            status: msg.status || "Completed",
+            filePath: msg.message,
+            isDownloading: false,
+            isFailed: false,
+          });
+
+          chrome.runtime
+            .sendMessage({
+              type: "download-completed",
+              payload: {
+                url: url,
+                progress: 100,
+                status: msg.status || "Completed",
+                filePath: msg.message,
+              },
+            })
+            .catch(() => {});
+
+          activeDownloads.delete(url);
+          reconnectAttempts.delete(url);
+
+          // Keep completed state visible until new video or F5/reload
+
+          port.disconnect();
+          resolve();
+        } else if (msg.type === "cancelled") {
+          downloadStates.delete(url);
+          cancelRequests.delete(url);
+          reconnectAttempts.delete(url);
+
+          // Remove from videosByTab to allow new detection
+          for (const [tabId, video] of videosByTab.entries()) {
+            if (video.url === url) {
+              videosByTab.delete(tabId);
+              break;
+            }
+          }
+
+          chrome.runtime
+            .sendMessage({
+              type: "download-cancelled",
+              payload: {
+                url: url,
+                message: msg.message || "User cancelled",
+              },
+            })
+            .catch(() => {});
+          activeDownloads.delete(url);
+          port.disconnect();
+          resolve();
+        } else if (msg.type === "error") {
+          const currentProgress = downloadStates.get(url)?.progress || 0;
+          downloadStates.set(url, {
+            progress: currentProgress,
+            status: "Failed",
+            isDownloading: false,
+            isFailed: true,
+            errorMessage: msg.message || msg.status || "Download failed",
+          });
+
+          chrome.runtime
+            .sendMessage({
+              type: "download-error",
+              payload: {
+                url: url,
+                message: msg.message || msg.status || "Download failed",
+              },
+            })
+            .catch(() => {});
+          activeDownloads.delete(url);
+          reconnectAttempts.delete(url);
+          port.disconnect();
+          reject(new Error(msg.message || "Download failed"));
+        } else {
+          if (msg.progress !== undefined) {
+            downloadStates.set(url, {
+              progress: msg.progress || 0,
+              status: msg.status || msg.message || "Downloading...",
+              isDownloading: true,
+              isFailed: false,
+            });
+
+            chrome.runtime
+              .sendMessage({
+                type: "download-progress",
+                payload: {
+                  url: url,
+                  progress: msg.progress || 0,
+                  status: msg.status || msg.message || "Downloading...",
+                },
+              })
+              .catch(() => {});
+          }
+        }
+      });
+
+      port.onDisconnect.addListener(() => {
+        clearTimeout(connectionTimeout);
+        activeDownloads.delete(url);
+
+        const error = chrome.runtime.lastError;
+        if (error) {
+          const state = downloadStates.get(url);
+          if (state && state.isDownloading && !cancelRequests.has(url)) {
+            attemptReconnect(url, payload, reconnectAttempts.get(url) || 0);
+          } else {
+            if (state && state.isDownloading) {
+              downloadStates.delete(url);
+            }
+            chrome.runtime
+              .sendMessage({
+                type: "native-error",
+                payload: error.message || "Connection lost",
+              })
+              .catch(() => {});
+          }
+          reject(error);
+        } else {
+          resolve();
+        }
+      });
+    } catch (error) {
+      activeDownloads.delete(url);
+      downloadStates.delete(url);
+      chrome.runtime
+        .sendMessage({
+          type: "native-error",
+          payload: "Failed to start download. Is Native Host running?",
+        })
+        .catch(() => {});
+      reject(error);
+    }
+  });
 }
 
 async function handleDetection(details) {
@@ -240,21 +507,52 @@ async function handleDetection(details) {
     detectedAt: Date.now(),
   };
 
-  // ✅ Hiển thị popup NGAY LẬP TỨC
-  if (details.tabId >= 0) {
-    chrome.tabs
-      .sendMessage(details.tabId, {
-        type: "show-popup",
-        payload: entry,
-      })
-      .catch(() => {});
-  }
-
-  // Xử lý preview và lưu storage sau (không chặn popup)
-  processEntry(entry, tab).catch((error) => {
-    console.error("Failed to process entry:", error);
-  });
+  processEntry(entry, tab).catch(() => {});
 }
+
+// Clear state when tab is refreshed or navigated
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === "loading" && changeInfo.url) {
+    // Tab is navigating to new URL or refreshing
+    const videoEntry = videosByTab.get(tabId);
+    if (videoEntry) {
+      const url = videoEntry.url;
+
+      // Clear state to allow new video detection
+      videosByTab.delete(tabId);
+      downloadStates.delete(url);
+      reconnectAttempts.delete(url);
+
+      if (activeDownloads.has(url)) {
+        const port = activeDownloads.get(url);
+        try {
+          port.disconnect();
+        } catch {}
+        activeDownloads.delete(url);
+      }
+    }
+  }
+});
+
+// Clear state when tab is closed
+chrome.tabs.onRemoved.addListener((tabId) => {
+  const videoEntry = videosByTab.get(tabId);
+  if (videoEntry) {
+    const url = videoEntry.url;
+
+    videosByTab.delete(tabId);
+    downloadStates.delete(url);
+    reconnectAttempts.delete(url);
+
+    if (activeDownloads.has(url)) {
+      const port = activeDownloads.get(url);
+      try {
+        port.disconnect();
+      } catch {}
+      activeDownloads.delete(url);
+    }
+  }
+});
 
 chrome.runtime.onInstalled.addListener(async () => {
   chrome.contextMenus.removeAll(() => {
@@ -268,9 +566,7 @@ chrome.runtime.onInstalled.addListener(async () => {
 
 chrome.contextMenus.onClicked.addListener(async (info) => {
   if (info.menuItemId !== "send-last") return;
-  const stored = await chrome.storage.local.get(STORAGE_KEY);
-  const latest = stored?.[STORAGE_KEY]?.[0];
-  if (!latest) {
+  if (!latestVideo) {
     chrome.notifications.create({
       type: "basic",
       iconUrl: ICON_PATH,
@@ -281,10 +577,8 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
   }
 
   try {
-    await sendToNative(latest);
-  } catch (error) {
-    console.error("Failed to send via context menu", error);
-  }
+    await sendToNative(latestVideo);
+  } catch (error) {}
 });
 
 chrome.action.onClicked.addListener(async (tab) => {
@@ -296,6 +590,11 @@ chrome.webRequest.onCompleted.addListener(
   async (details) => {
     if (!details.url) return;
     if (!details.url.toLowerCase().includes(".m3u8")) return;
+
+    // Ignore requests from extension itself (popup's HLS.js player)
+    if (details.initiator?.startsWith("chrome-extension://")) return;
+    if (details.tabId === -1) return; // Extension internal requests
+
     await handleDetection(details);
   },
   {
@@ -307,7 +606,9 @@ chrome.webRequest.onCompleted.addListener(
 chrome.webRequest.onErrorOccurred.addListener(
   (details) => {
     if (details.url?.toLowerCase().includes(".m3u8")) {
-      console.warn("M3U8 request error", details);
+      // Ignore errors from extension itself (popup's HLS.js player)
+      if (details.initiator?.startsWith("chrome-extension://")) return;
+      if (details.tabId === -1) return;
     }
   },
   {
@@ -317,36 +618,178 @@ chrome.webRequest.onErrorOccurred.addListener(
 );
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type === "get-links") {
-    chrome.storage.local.get(STORAGE_KEY).then((result) => {
-      sendResponse(result?.[STORAGE_KEY] ?? []);
+  if (message?.type === "get-latest-video") {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const currentTab = tabs[0];
+      const results = [];
+      const seenUrls = new Set();
+
+      for (const [url, state] of downloadStates.entries()) {
+        if (seenUrls.has(url)) continue;
+
+        let videoEntry = null;
+        for (const [tabId, video] of videosByTab.entries()) {
+          if (video.url === url) {
+            videoEntry = video;
+            break;
+          }
+        }
+
+        if (!videoEntry) {
+          videoEntry = {
+            url: url,
+            tabId: -1,
+            tabTitle: "Download in progress",
+            pageUrl: "",
+            method: "M3U8",
+            detectedAt: Date.now(),
+          };
+        }
+
+        results.push(videoEntry);
+        seenUrls.add(url);
+      }
+
+      if (currentTab) {
+        const tabVideo = videosByTab.get(currentTab.id);
+        if (tabVideo && !seenUrls.has(tabVideo.url)) {
+          results.push(tabVideo);
+          seenUrls.add(tabVideo.url);
+        }
+      }
+
+      const uniqueResults = [];
+      const finalUrls = new Set();
+      const getBaseUrl = (url) => {
+        try {
+          const urlObj = new URL(url);
+          return urlObj.origin + urlObj.pathname;
+        } catch {
+          return url;
+        }
+      };
+
+      for (const video of results) {
+        const baseUrl = getBaseUrl(video.url);
+        if (!finalUrls.has(baseUrl)) {
+          uniqueResults.push(video);
+          finalUrls.add(baseUrl);
+        }
+      }
+
+      sendResponse(uniqueResults);
     });
+    return true;
+  }
+
+  if (message?.type === "get-download-state") {
+    const states = Array.from(downloadStates.entries()).map(([url, state]) => ({
+      url,
+      ...state,
+    }));
+    sendResponse(states);
+    return true;
+  }
+
+  if (message?.type === "clear-failed-state" && message.payload) {
+    const url = message.payload.url;
+    const state = downloadStates.get(url);
+    if (state && state.isFailed) {
+      downloadStates.delete(url);
+    }
+    sendResponse({ ok: true });
     return true;
   }
 
   if (message?.type === "resend-link" && message.payload) {
-    sendToNative(message.payload).catch((error) => {
-      console.error("Resend failed", error);
+    const url = message.payload.url;
+
+    if (activeDownloads.has(url)) {
+      sendResponse({ ok: false, message: "Already downloading" });
+      return true;
+    }
+
+    downloadStates.set(url, {
+      progress: 0,
+      status: "Connecting...",
+      isDownloading: true,
+      isFailed: false,
     });
+
+    chrome.runtime
+      .sendMessage({
+        type: "download-progress",
+        payload: {
+          url: url,
+          progress: 0,
+          status: "Connecting...",
+        },
+      })
+      .catch(() => {});
+
+    reconnectAttempts.delete(url);
+
+    startDownload(message.payload)
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, message: error.message }));
+
+    return true;
   }
 
-  if (message?.type === "clear-links") {
-    chrome.storage.local
-      .set({ [STORAGE_KEY]: [] })
-      .then(() => {
+  if (message?.type === "cancel-download" && message.payload) {
+    const url = message.payload.url;
+
+    if (cancelRequests.has(url)) {
+      sendResponse({ ok: false, message: "Already cancelling" });
+      return true;
+    }
+
+    cancelRequests.add(url);
+
+    fetch("http://localhost:9876/cancel")
+      .then((response) => response.json())
+      .then((data) => {
+        activeDownloads.delete(url);
+        cancelRequests.delete(url);
+        downloadStates.delete(url);
+        reconnectAttempts.delete(url);
+
+        for (const [tabId, video] of videosByTab.entries()) {
+          if (video.url === url) {
+            videosByTab.delete(tabId);
+            break;
+          }
+        }
+
         chrome.runtime
-          .sendMessage({ type: "links-updated", payload: [] })
+          .sendMessage({
+            type: "download-cancelled",
+            payload: { url },
+          })
           .catch(() => {});
-        sendResponse({ ok: true });
       })
       .catch((error) => {
-        console.error("Failed to clear links", error);
-        sendResponse({
-          ok: false,
-          error: error?.message ?? "Failed to clear captured links.",
-        });
+        cancelRequests.delete(url);
       });
+
+    sendResponse({ ok: true });
     return true;
+  }
+
+  if (message?.type === "open-folder") {
+    const port = chrome.runtime.connectNative(NATIVE_HOST);
+    port.postMessage({
+      action: "open-folder",
+      filePath: message.payload?.filePath,
+    });
+
+    port.onMessage.addListener((response) => {
+      port.disconnect();
+    });
+
+    setTimeout(() => {
+      port.disconnect();
+    }, 2000);
   }
 
   if (message?.type === "video-detected" && message.payload?.url) {
@@ -361,26 +804,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       detectedAt: Date.now(),
     };
 
-    processEntry(entry, tab).catch((error) => {
-      console.error("Failed to record video capture", error);
-    });
+    processEntry(entry, tab).catch(() => {});
   }
 
   if (message?.type === "download-video" && message.payload) {
-    console.log("📥 Download request received:", message.payload);
-
-    // Gọi sendToNative với payload
     sendToNative(message.payload)
       .then((response) => {
-        console.log("✅ Native host response:", response);
         sendResponse({ success: true, response });
       })
       .catch((error) => {
-        console.error("❌ Native host error:", error);
         sendResponse({ success: false, error: error.message });
       });
 
-    // Return true để giữ channel mở cho async response
     return true;
   }
 
